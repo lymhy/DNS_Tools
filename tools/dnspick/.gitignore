@@ -1,0 +1,12 @@
+# 构建产物（必须锚定到模块根目录：写成不带 "/" 的 dnspick 会连 cmd/dnspick/ 整个包一起忽略掉）
+/dnspick
+/dnspick.exe
+/dnspick-test.exe
+
+# 测试输出
+r.json
+r.csv
+run*.json
+bogus-*.yaml
+dnspick-result-*.txt
+dnspick.yaml

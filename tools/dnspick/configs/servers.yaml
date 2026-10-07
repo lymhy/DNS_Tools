@@ -1,0 +1,46 @@
+# dnspick 候选 DNS 配置（与内置默认一致，可自行增删；用 --config 使用本文件）
+servers:
+  - name: 腾讯DNSPod
+    ips: ["119.29.29.29", "182.254.116.116"]
+    ipv6: ["2402:4e00::"]
+    doh: https://doh.pub/dns-query
+    dot: dot.pub:853
+    region: 境内
+  - name: 阿里AliDNS
+    ips: ["223.5.5.5", "223.6.6.6"]
+    ipv6: ["2400:3200::1", "2400:3200:baba::1"]
+    doh: https://dns.alidns.com/dns-query
+    dot: dns.alidns.com:853
+    region: 境内
+  - name: 114DNS
+    ips: ["114.114.114.114", "114.114.115.115"]
+    region: 境内
+  - name: 360DNS
+    ips: ["101.226.4.6", "123.125.81.6"]
+    doh: https://doh.360.cn/dns-query
+    region: 境内
+  - name: 百度DNS
+    ips: ["180.76.76.76"]
+    doh: https://dns.baidu.com/dns-query
+    region: 境内
+  - name: CNNIC SDNS
+    ips: ["1.2.4.8", "210.2.4.8"]
+    region: 境内
+  - name: Google
+    ips: ["8.8.8.8", "8.8.4.4"]
+    ipv6: ["2001:4860:4860::8888"]
+    doh: https://dns.google/dns-query
+    dot: dns.google:853
+    region: 境外
+  - name: Cloudflare
+    ips: ["1.1.1.1", "1.0.0.1"]
+    ipv6: ["2606:4700:4700::1111"]
+    doh: https://cloudflare-dns.com/dns-query
+    dot: one.one.one.one:853
+    region: 境外
+  - name: Quad9
+    ips: ["9.9.9.9"]
+    ipv6: ["2620:fe::fe"]
+    doh: https://dns.quad9.net/dns-query
+    dot: dns.quad9.net:853
+    region: 境外

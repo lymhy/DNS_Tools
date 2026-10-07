@@ -1,0 +1,32 @@
+# dnspick 探测域名配置（用 --config 使用本文件）
+domains:
+  web:
+    - www.baidu.com
+    - www.qq.com
+    - www.taobao.com
+    - www.jd.com
+    - www.bilibili.com
+  video:
+    - v.qq.com
+    - www.iqiyi.com
+    - www.douyin.com
+  cdn:
+    - img.alicdn.com
+    - dl.google.com
+    - mirrors.tuna.tsinghua.edu.cn
+  # 污染样本（完整模式使用；可自行添加你关心的域名）
+  polluted:
+    - www.youtube.com
+    - twitter.com
+    - www.facebook.com
+    - www.instagram.com
+    - www.wikipedia.org
+    - www.reddit.com
+    - news.ycombinator.com
+
+# 评分权重：总分 = latency*延迟分 + stable*稳定分 + proximity*就近分 + cleanness*干净分
+weights:
+  latency: 0.35
+  stable: 0.20
+  proximity: 0.30
+  cleanness: 0.15
