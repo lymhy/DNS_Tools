@@ -18,6 +18,9 @@ type Row struct {
 
 	Geo string // 归属地描述（由 CLI 填充，可为空）
 
+	// GroupProto 是所属协议组（= Endpoint.Proto），报告/CSV 直读用。
+	GroupProto prober.Protocol
+
 	LatencyScore  float64 // 0~100
 	StableScore   float64
 	Proximity     float64
@@ -33,31 +36,74 @@ type Row struct {
 	Usable bool
 }
 
-// Score 对所有端点评分排序。
+// Group 是一个协议组的排名结果：组内已排序，Main/Back 为本组主备推荐。
+type Group struct {
+	Proto prober.Protocol
+	Rows  []*Row // 含本组的本地基线行（不占名次）
+	Main  *Row
+	Back  *Row
+}
+
+// GroupedResult 是分组后的完整结果：udp / udp6 / doh / dot 各自排名、各自推荐。
+// All 是各组按固定顺序拼接的扁平视图，供 JSON/CSV 与兼容调用方消费。
+type GroupedResult struct {
+	Groups []Group
+	All    []*Row
+}
+
+// UDPServers 返回可写入系统 DNS 的主备行：优先 udp 组，其次 udp6 组。
+func (g *GroupedResult) UDPServers() (main, back *Row) {
+	for _, want := range []prober.Protocol{prober.UDP, prober.UDP6} {
+		for _, grp := range g.Groups {
+			if grp.Proto == want {
+				return grp.Main, grp.Back
+			}
+		}
+	}
+	return nil, nil
+}
+
+// Score 对所有端点评分排序；返回扁平视图（各协议组按固定顺序拼接）。
+// 单协议输入下与分组前行为完全一致；多协议请用 ScoreByGroup 取各组名次与主备。
 func Score(r *prober.Runner, cfg *config.Weights, geoOK bool) []*Row {
-	var rows []*Row
+	return ScoreByGroup(r, cfg, geoOK).All
+}
+
+// ScoreByGroup 按协议分组评分：跨协议延迟本不可比（第 3 条），
+// 因此归一化基准与名次都在组内计算，各组各自推荐主备。
+func ScoreByGroup(r *prober.Runner, cfg *config.Weights, geoOK bool) *GroupedResult {
+	aux := r.TH.AuxEnabled
+	seen := map[string]bool{}
+	byProto := map[prober.Protocol][]*Row{}
 	for _, ep := range r.Endpoints {
 		// 去重：同一地址可能同时作为系统 DNS 与内置候选出现，二者共享同一份
 		// Metrics，报告中只保留先出现的一行，避免重复行与重复计数。
-		dup := false
-		for _, prev := range rows {
-			if prev.Endpoint.Label() == ep.Label() {
-				dup = true
-				break
-			}
-		}
-		if dup {
+		if seen[ep.Label()] {
 			continue
 		}
-		rows = append(rows, &Row{Endpoint: ep, Metrics: r.Metrics(ep)})
+		seen[ep.Label()] = true
+		byProto[ep.Proto] = append(byProto[ep.Proto], &Row{
+			Endpoint: ep, Metrics: r.Metrics(ep), GroupProto: ep.Proto,
+		})
 	}
-	if len(rows) == 0 {
-		return rows
+	gr := &GroupedResult{}
+	for _, p := range []prober.Protocol{prober.UDP, prober.UDP6, prober.DOH, prober.DOT} {
+		rows := byProto[p]
+		if len(rows) == 0 {
+			continue
+		}
+		sorted, main, back := scoreGroup(rows, cfg, geoOK, aux)
+		gr.Groups = append(gr.Groups, Group{Proto: p, Rows: sorted, Main: main, Back: back})
+		gr.All = append(gr.All, sorted...)
 	}
+	return gr
+}
 
-	// 归一化基准：候选集内最快缓存 P50 / 最快递归 P50 / 最快 TCP 中位。
+// scoreGroup 对单一协议组归一化、评分、排名并推荐主备。
+func scoreGroup(rows []*Row, cfg *config.Weights, geoOK, aux bool) ([]*Row, *Row, *Row) {
+	// 组内归一化基准：组内最快缓存 P50 / 最快递归 P50 / 最快 TCP 中位。
 	// 排除系统基线端点：网关 DNS 延迟天然极低（直连同一局域网），纳入基准会把
-	// 所有公共 DNS 的延迟分压到 0 附近，失去区分度（对应方案 4.2 基线单独展示）。
+	// 组内公共 DNS 的延迟分压到 0 附近，失去区分度。
 	// 用 0 表示"没有样本"，不用哨兵值，避免"无基准"被当成"基准为 0"。
 	bestCache, bestRec, bestTCP := 0.0, 0.0, 0.0
 	for _, row := range rows {
@@ -133,6 +179,24 @@ func Score(r *prober.Runner, cfg *config.Weights, geoOK bool) []*Row {
 			row.Flags = append(row.Flags, fmt.Sprintf("污染%d/%d", row.PollutionHits, row.PollutionTotal))
 		}
 
+		// 能力/质量披露：不计入总分（权重四项和恒为 1），只作标注与报告列。
+		if row.Usable && aux {
+			if row.DNSSECStrict || row.DNSSECAD {
+				row.Flags = append(row.Flags, "DNSSEC验证")
+			} else {
+				row.Flags = append(row.Flags, "DNSSEC未验证")
+			}
+			if row.AAAAFailRate > 0 {
+				row.Flags = append(row.Flags, "AAAA异常")
+			}
+		}
+		if row.Usable && row.PacketLoss > 0.05 {
+			row.Flags = append(row.Flags, fmt.Sprintf("丢包%.0f%%", row.PacketLoss*100))
+		}
+		if row.NSIDShared {
+			row.Flags = append(row.Flags, "NSID重复(可能代理)")
+		}
+
 		// 没有任何成功测量：各维度一律记 0，干净分也不保留默认满分，
 		// 否则"没测到"会被当成"已验证干净"而白拿 0.15×100 = 15 分。
 		if !row.Usable {
@@ -156,8 +220,8 @@ func Score(r *prober.Runner, cfg *config.Weights, geoOK bool) []*Row {
 		row.Rank = rank
 	}
 
-	recommend(rows)
-	return rows
+	main, back := recommend(rows)
+	return rows, main, back
 }
 
 // less 定义排序：先按"有没有数据"，再按总分降序，并列时用成功率、缓存延迟、
@@ -187,7 +251,8 @@ func less(a, b *Row) bool {
 
 // recommend 按方案 4.2：主用 = 干净分满分者优先；备用与主用分属不同运营方。
 // 只有真正测到数据的端点参与推荐（系统/运营商基线只展示，不参与主备）。
-func recommend(rows []*Row) {
+// 返回组内主备行（同时写回 Row 的 RecommendMain/Back 标记）。
+func recommend(rows []*Row) (main, back *Row) {
 	var candidates []*Row
 	for _, row := range rows {
 		if !row.Endpoint.IsSystem && row.Usable {
@@ -195,9 +260,9 @@ func recommend(rows []*Row) {
 		}
 	}
 	if len(candidates) == 0 {
-		return
+		return nil, nil
 	}
-	main := candidates[0]
+	main = candidates[0]
 	// 安全优先：若第一名干净分 < 100，在干净分满分者中取总分第一。
 	if main.CleanScore < 100 {
 		for _, row := range candidates[1:] {
@@ -215,9 +280,11 @@ func recommend(rows []*Row) {
 		}
 		if familyOf(row.Endpoint.Server) != familyOf(main.Endpoint.Server) {
 			row.RecommendBack = true
+			back = row
 			break
 		}
 	}
+	return main, back
 }
 
 // familyOf 把候选 DNS 归到同一运营方，用于"主备不要同一家"的判断

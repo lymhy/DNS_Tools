@@ -46,12 +46,26 @@ type Metrics struct {
 	Queries  int
 	Failed   int
 
+	// ── 统计口径（第 2 条）──
+	SampleN     int     // 有效样本数（不含热身）
+	CacheMean   float64 // ms，缓存延迟均值
+	CacheStdDev float64 // ms，样本标准差（n-1）
+	CacheCI95   float64 // ms，均值 95% 置信区间半宽
+	RecCI95     float64 // ms，递归延迟均值 95% CI 半宽
+
+	// ── 丢包率（第 7 条）──
+	// 用"首次尝试"统计：QueryA 的失败重试会掩盖首次丢包。
+	Attempts   int
+	FirstFail  int
+	PacketLoss float64 // 0~1 = FirstFail/Attempts
+
 	NXDomainHijack    bool
 	TransparentHijack bool
 	EchoIP            string
 
 	PollutionHits     int
 	PollutionTotal    int
+	PollutionSample   []string // 一次被判为污染的答案，作为证据留存
 	ConsistencyIssues int
 
 	CDNIPs           []string
@@ -59,6 +73,21 @@ type Metrics struct {
 	TCPMedian        float64 // ms
 	TTFBMedian       float64 // ms（完整模式）
 	ECSSupported     bool
+
+	// ── DNSSEC（第 7 条）──
+	DNSSECAD     bool // 应答 AD=1，解析器声称做了验证
+	DNSSECRRSIG  bool // 应答含 RRSIG（上游有签名）
+	DNSSECStrict bool // 对签名失效域名返回 SERVFAIL，说明真的在验证
+
+	// ── NSID / CHAOS（第 7 条）──
+	NSID         string // RFC 5001 NSID（hex 字符串），空 = 不支持
+	NSIDShared   bool   // 与另一个"服务器名"返回同一 NSID → 很可能是同一解析器/代理
+	ChaosVersion string // CHAOS version.bind / hostname.bind
+
+	// ── 双栈（第 7 条）──
+	SupportsAAAA bool    // 解析器正常应答 AAAA
+	AAAAFailRate float64 // 0~1，AAAA 查询中 SERVFAIL/超时的比例
+	PreferredV6  int     // -1 倾向 v4 / 0 相当 / 1 倾向 v6
 
 	SystemDNS string // 对基线端点记录
 
@@ -93,10 +122,26 @@ func (r *rateLimiter) wait(key string) {
 	r.last[key] = time.Now()
 }
 
-// Querier 是协议层的最小查询接口：向端点查询 name 的 A 记录，返回 IP 列表与 RTT。
+// DNSSECReply 是一次带 DO 位查询的可判定结果。
+type DNSSECReply struct {
+	AD      bool     // 应答 AuthenticatedData 位
+	RRSIG   bool     // 应答中含 RRSIG 记录
+	RCode   int      // dns.Rcode*；SERVFAIL 表示 DNSSEC 验证失败
+	Answers []string // A/AAAA 答案（便于排查）
+}
+
+// Querier 是协议层的最小查询接口：向端点查询各类记录，返回结果与 RTT。
 type Querier interface {
 	QueryA(ep Endpoint, name string, timeout time.Duration) (ips []string, rtt time.Duration, err error)
+	QueryAAAA(ep Endpoint, name string, timeout time.Duration) (ips []string, rtt time.Duration, err error)
 	QueryTXT(ep Endpoint, name string, timeout time.Duration) (txt []string, rtt time.Duration, err error)
 	QueryNSViaTCP(name string, timeout time.Duration) (ips []string, err error) // 直接问权威 NS（TCP 53），用于污染比对
 	QueryWithECS(ep Endpoint, name string, ecsNet net.IPNet, timeout time.Duration) (ips []string, rtt time.Duration, err error)
+
+	// QueryWithDO 以 DO=1 查询，返回 AD / RRSIG / Rcode，用于 DNSSEC 判定（RFC 4035）。
+	QueryWithDO(ep Endpoint, name string, timeout time.Duration) (*DNSSECReply, error)
+	// QueryNSID 请求 EDNS0 NSID 选项，返回 hex 字符串（RFC 5001）；空串表示解析器不支持。
+	QueryNSID(ep Endpoint, timeout time.Duration) (nsidHex string, err error)
+	// QueryCHAOS 以 CH 类查询 version.bind / hostname.bind（RFC 4892 实践）。
+	QueryCHAOS(ep Endpoint, name string, timeout time.Duration) (txt []string, err error)
 }

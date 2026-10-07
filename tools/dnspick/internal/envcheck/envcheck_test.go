@@ -97,6 +97,25 @@ func TestParseAliasDNS(t *testing.T) {
 	}
 }
 
+// 虚拟网卡只有真的成了默认路由出口才算"接管上网流量"；
+// Tailscale 未开 exit node 时上网仍走物理网卡，不该被判为 TUN。
+func TestTUNTakesOver(t *testing.T) {
+	cases := []struct {
+		iface, exit string
+		want        bool
+	}{
+		{"Tailscale", "WLAN", false},   // 虚拟网卡在，但出口是物理网卡 → 不接管
+		{"Tailscale", "Tailscale", true}, // 出口就是它 → 接管
+		{"singbox_tun", "SINGBOX_TUN", true}, // 名字大小写不同也算同一块
+		{"Tailscale", "", true},        // 探不到默认路由 → 保守判真
+	}
+	for _, c := range cases {
+		if got := tunTakesOver(c.iface, c.exit); got != c.want {
+			t.Errorf("tunTakesOver(%q, %q) = %v, want %v", c.iface, c.exit, got, c.want)
+		}
+	}
+}
+
 // 用户明确指定了网卡时，读不到 DNS 也不能悄悄回落到别的网卡。
 func TestSystemDNSForUnknownInterface(t *testing.T) {
 	dns, from := SystemDNSFor("这个网卡肯定不存在-9f8e7d")

@@ -16,27 +16,78 @@ import (
 	"dnspick/internal/score"
 )
 
-// Table 渲染终端排名表（对齐方案 4.3 示例），同时返回完整文本供保存结果文件。
+// ReportMeta 是本次运行的测量元数据，随终端报告 / JSON 一并输出，
+// 让结果文件自身就能说明"这轮是怎么测的"，便于复现与审计。
+type ReportMeta struct {
+	Version    string    `json:"version"`
+	Mode       string    `json:"mode"` // 快速 / 完整
+	Seed       int64     `json:"seed"`
+	Samples    int       `json:"samples"`
+	Warmup     int       `json:"warmup"`
+	QPS        float64   `json:"qps"`
+	TimeoutMS  int       `json:"timeout_ms"`
+	Retries    int       `json:"retries"`
+	AuxEnabled bool      `json:"aux_enabled"`
+	Started    time.Time `json:"started"`
+	Finished   time.Time `json:"finished"`
+	DurationS  float64   `json:"duration_s"`
+}
+
+// Table 渲染终端排名表：按协议组分别成表（每组各自排名、各自推荐主备）。
 // caveat 非空时作为醒目提示追加在末尾，让存下来的结果文件自身就说明这轮不可信。
-func Table(rows []*score.Row, envSummary, caveat string, full bool) string {
+func Table(gr *score.GroupedResult, meta ReportMeta, envSummary, caveat string, full bool) string {
 	var buf bytes.Buffer
-	w := tablewriter.NewWriter(&buf)
 	fmt.Fprintln(&buf)
 	if envSummary != "" {
 		fmt.Fprintln(&buf, envSummary)
 	}
-	fmt.Fprintf(&buf, "测试时间: %s\n\n", time.Now().Format("2006-01-02 15:04:05"))
-	if base := baseline(rows); base != nil {
-		fmt.Fprintf(&buf, "本地基线（仅作对比，不参与推荐、不参与归一化基准）：%s 缓存P50 %s、成功率 %.0f%%、同省率 %s\n\n",
+	fmt.Fprintf(&buf, "测试时间: %s\n", meta.Finished.Format("2006-01-02 15:04:05"))
+	fmt.Fprintf(&buf, "测量元数据: 版本 v%s | 模式 %s | seed %d | 样本 %d（+热身 %d）| QPS≤%g | 超时 %dms | 重试 %d | 辅助探测 %s | 耗时 %.0fs\n",
+		meta.Version, meta.Mode, meta.Seed, meta.Samples, meta.Warmup,
+		meta.QPS, meta.TimeoutMS, meta.Retries, onOff(meta.AuxEnabled), meta.DurationS)
+	fmt.Fprintln(&buf)
+
+	for _, g := range gr.Groups {
+		renderGroup(&buf, g, meta.AuxEnabled, full)
+		fmt.Fprintln(&buf)
+		switch {
+		case g.Main == nil:
+			fmt.Fprintf(&buf, "本组建议：没有端点测到有效数据，不做推荐\n")
+		case g.Back != nil:
+			fmt.Fprintf(&buf, "本组建议：主用 %s，备用 %s\n", g.Main.Endpoint.Server, g.Back.Endpoint.Server)
+		default:
+			fmt.Fprintf(&buf, "本组建议：主用 %s（未找到跨运营商的备用）\n", g.Main.Endpoint.Server)
+		}
+		fmt.Fprintln(&buf)
+	}
+
+	if caveat != "" {
+		fmt.Fprintln(&buf, caveat)
+		fmt.Fprintln(&buf)
+	}
+	fmt.Fprintln(&buf, "口径说明：分位数为 R-7 线性插值（与 numpy/Excel PERCENTILE.INC 一致）；CI± 为均值的 95% 置信区间半宽（t 分布）；名次为「协议组内」排名，跨协议不可比。")
+
+	fmt.Print(buf.String())
+	return buf.String()
+}
+
+// renderGroup 渲染单个协议组：基线行 + 组内排名表。
+func renderGroup(buf *bytes.Buffer, g score.Group, aux, full bool) {
+	fmt.Fprintf(buf, "【协议组 %s】\n", g.Proto)
+	if base := baseline(g.Rows); base != nil {
+		fmt.Fprintf(buf, "本地基线（仅作对比，不参与推荐、不参与归一化基准）：%s 缓存P50 %s、成功率 %.0f%%、同省率 %s\n",
 			base.Endpoint.Server, ms(base.CacheP50), base.Success*100, rate(base.SameProvinceRate))
 	}
-	hdr := []string{"排名", "DNS", "协议", "归属", "缓存P50", "成功率", "同省率", "TCP中位", "干净度", "总分", "备注"}
+
+	hdr := []string{"排名", "DNS", "协议", "归属", "缓存P50", "样本n", "丢包", "成功率", "同省率", "TCP中位", "干净度", "总分", "备注"}
 	if full {
-		hdr = []string{"排名", "DNS", "协议", "归属", "缓存P50", "递归P50", "成功率", "同省率", "TCP中位", "TTFB", "干净度", "总分", "备注"}
+		hdr = []string{"排名", "DNS", "协议", "归属", "缓存P50", "递归P50", "样本n", "丢包", "CI±",
+			"成功率", "同省率", "TCP中位", "TTFB", "NSID", "DNSSEC", "AAAA", "干净度", "总分", "备注"}
 	}
+	w := tablewriter.NewWriter(buf)
 	w.SetHeader(hdr)
 	w.SetAutoFormatHeaders(false)
-	for _, r := range rows {
+	for _, r := range g.Rows {
 		mark := ""
 		if r.RecommendMain {
 			mark = "◀ 推荐"
@@ -44,69 +95,25 @@ func Table(rows []*score.Row, envSummary, caveat string, full bool) string {
 			mark = "◀ 备用"
 		}
 		row := []string{
-			rank(r),
-			r.Endpoint.Server,
-			string(r.Endpoint.Proto),
-			geo(r.Geo),
-			ms(r.CacheP50),
-			fmt.Sprintf("%.0f%%", r.Success*100),
-			rate(r.SameProvinceRate),
-			ms(r.TCPMedian),
-			clean(r),
-			fmt.Sprintf("%.1f", r.Total),
+			rank(r), r.Endpoint.Server, string(r.Endpoint.Proto), geo(r.Geo),
+			ms(r.CacheP50), sampleN(r), loss(r),
+			fmt.Sprintf("%.0f%%", r.Success*100), rate(r.SameProvinceRate), ms(r.TCPMedian),
+			clean(r), fmt.Sprintf("%.1f", r.Total),
 			mark + " " + strings.Join(r.Flags, ","),
 		}
 		if full {
 			row = []string{
-				rank(r),
-				r.Endpoint.Server,
-				string(r.Endpoint.Proto),
-				geo(r.Geo),
-				ms(r.CacheP50),
-				ms(r.RecP50),
-				fmt.Sprintf("%.0f%%", r.Success*100),
-				rate(r.SameProvinceRate),
-				ms(r.TCPMedian),
-				ms(r.TTFBMedian),
-				clean(r),
-				fmt.Sprintf("%.1f", r.Total),
+				rank(r), r.Endpoint.Server, string(r.Endpoint.Proto), geo(r.Geo),
+				ms(r.CacheP50), ms(r.RecP50), sampleN(r), loss(r), ci(r),
+				fmt.Sprintf("%.0f%%", r.Success*100), rate(r.SameProvinceRate), ms(r.TCPMedian), ms(r.TTFBMedian),
+				nsidCell(r, aux), dnssecCell(r, aux), aaaaCell(r, aux),
+				clean(r), fmt.Sprintf("%.1f", r.Total),
 				mark + " " + strings.Join(r.Flags, ","),
 			}
 		}
 		w.Append(row)
 	}
 	w.Render()
-
-	main, back := pick(rows)
-	if main != nil {
-		fmt.Fprintln(&buf)
-		if back != nil {
-			fmt.Fprintf(&buf, "建议：主用 %s，备用 %s\n", main.Endpoint.Server, back.Endpoint.Server)
-		} else {
-			fmt.Fprintf(&buf, "建议：主用 %s（未找到跨运营商的备用）\n", main.Endpoint.Server)
-		}
-	} else {
-		fmt.Fprintln(&buf)
-		fmt.Fprintln(&buf, "建议：本次没有任何端点测到有效数据，不做推荐（请检查网络/代理/VPN 后重试）")
-	}
-	if caveat != "" {
-		fmt.Fprintln(&buf)
-		fmt.Fprintln(&buf, caveat)
-	}
-	fmt.Print(buf.String())
-	return buf.String()
-}
-
-func pick(rows []*score.Row) (main, back *score.Row) {
-	for _, r := range rows {
-		if r.RecommendMain {
-			main = r
-		}
-		if r.RecommendBack {
-			back = r
-		}
-	}
-	return
 }
 
 func baseline(rows []*score.Row) *score.Row {
@@ -116,6 +123,13 @@ func baseline(rows []*score.Row) *score.Row {
 		}
 	}
 	return nil
+}
+
+func onOff(b bool) string {
+	if b {
+		return "开"
+	}
+	return "关"
 }
 
 func geo(s string) string {
@@ -154,11 +168,74 @@ func ms(v float64) string {
 	return fmt.Sprintf("%.0fms", v)
 }
 
-// JSON 导出完整结果。
-func JSON(rows []*score.Row, path string) error {
+func sampleN(r *score.Row) string {
+	if r.SampleN <= 0 {
+		return "-"
+	}
+	return fmt.Sprint(r.SampleN)
+}
+
+// loss 丢包率（首次尝试口径）；无尝试时留 "-" 而不是 0%。
+func loss(r *score.Row) string {
+	if r.Attempts == 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%.0f%%", r.PacketLoss*100)
+}
+
+func ci(r *score.Row) string {
+	if r.CacheCI95 <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("±%.1f", r.CacheCI95)
+}
+
+func nsidCell(r *score.Row, aux bool) string {
+	if !aux || r.NSID == "" {
+		return "-"
+	}
+	return r.NSID
+}
+
+func dnssecCell(r *score.Row, aux bool) string {
+	if !aux || !r.Usable {
+		return "-"
+	}
+	if r.DNSSECStrict || r.DNSSECAD {
+		return "验证"
+	}
+	return "未验证"
+}
+
+func aaaaCell(r *score.Row, aux bool) string {
+	if !aux || !r.Usable {
+		return "-"
+	}
+	if r.AAAAFailRate > 0 {
+		return fmt.Sprintf("异常%.0f%%", r.AAAAFailRate*100)
+	}
+	if r.SupportsAAAA {
+		return "支持"
+	}
+	return "-"
+}
+
+// JSON 导出完整结果：顶层含 meta 与 groups（分组），results 保留扁平全量（schema 向后兼容）。
+func JSON(gr *score.GroupedResult, meta ReportMeta, path string) error {
+	groups := make([]map[string]any, 0, len(gr.Groups))
+	for _, g := range gr.Groups {
+		groups = append(groups, map[string]any{
+			"proto":   string(g.Proto),
+			"main":    g.Main,
+			"back":    g.Back,
+			"results": g.Rows,
+		})
+	}
 	out := map[string]any{
 		"time":    time.Now().Format(time.RFC3339),
-		"results": rows,
+		"meta":    meta,
+		"groups":  groups,
+		"results": gr.All,
 	}
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
@@ -167,25 +244,35 @@ func JSON(rows []*score.Row, path string) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-// CSV 导出扁平结果。未知值留空而不是写 0 / -1：下游按数值处理时，
+// CSV 导出分组结果。未知值留空而不是写 0 / -1：下游按数值处理时，
 // 0 会被当成"延迟极低""同省率 0%"，而它们其实是"没测到"。
-func CSV(rows []*score.Row, path string) error {
+// 首行为注释：rank 为协议组内排名（跨协议不可比）。
+func CSV(gr *score.GroupedResult, path string) error {
 	f, err := os.Create(path)
 	if err != nil {
 		return err
 	}
-	recs := [][]string{{"rank", "server", "endpoint", "proto", "geo", "usable", "cache_p50_ms", "rec_p50_ms",
-		"success_rate", "same_province_rate", "tcp_median_ms", "ttfb_median_ms", "clean_score", "total", "flags"}}
-	for _, r := range rows {
-		recs = append(recs, []string{
-			fmt.Sprint(r.Rank), r.Endpoint.Server, r.Endpoint.Label(), string(r.Endpoint.Proto),
-			r.Geo, fmt.Sprint(r.Usable),
-			fnum(r.CacheP50), fnum(r.RecP50),
-			fmt.Sprintf("%.3f", r.Success), frate(r.SameProvinceRate),
-			fnum(r.TCPMedian), fnum(r.TTFBMedian),
-			fnum(r.CleanScore), fmt.Sprintf("%.1f", r.Total),
-			strings.Join(r.Flags, ";"),
-		})
+	recs := [][]string{
+		{"# rank 为协议组内排名；跨协议不可比"},
+		{"group", "rank", "server", "endpoint", "proto", "geo", "usable",
+			"cache_p50_ms", "rec_p50_ms", "success_rate", "same_province_rate",
+			"tcp_median_ms", "ttfb_median_ms", "n_samples", "loss_rate", "ci95_ms",
+			"nsid", "dnssec", "aaaa", "clean_score", "total", "flags"},
+	}
+	for _, g := range gr.Groups {
+		for _, r := range g.Rows {
+			recs = append(recs, []string{
+				string(g.Proto), fmt.Sprint(r.Rank), r.Endpoint.Server, r.Endpoint.Label(), string(r.Endpoint.Proto),
+				r.Geo, fmt.Sprint(r.Usable),
+				fnum(r.CacheP50), fnum(r.RecP50),
+				fmt.Sprintf("%.3f", r.Success), frate(r.SameProvinceRate),
+				fnum(r.TCPMedian), fnum(r.TTFBMedian),
+				fmt.Sprint(r.SampleN), fmt.Sprintf("%.3f", r.PacketLoss), fnum(r.CacheCI95),
+				r.NSID, csvDNSSEC(r), csvAAAA(r),
+				fnum(r.CleanScore), fmt.Sprintf("%.1f", r.Total),
+				strings.Join(r.Flags, ";"),
+			})
+		}
 	}
 	cw := csv.NewWriter(f)
 	// WriteAll 内部会 Flush；错误必须显式检查，否则写盘失败会静默返回 nil。
@@ -198,6 +285,26 @@ func CSV(rows []*score.Row, path string) error {
 		return err
 	}
 	return f.Close()
+}
+
+func csvDNSSEC(r *score.Row) string {
+	if r.DNSSECStrict || r.DNSSECAD {
+		return "verified"
+	}
+	if r.DNSSECRRSIG {
+		return "rrsig-unverified"
+	}
+	return "unverified"
+}
+
+func csvAAAA(r *score.Row) string {
+	if r.AAAAFailRate > 0 {
+		return fmt.Sprintf("%.3f", r.AAAAFailRate)
+	}
+	if r.SupportsAAAA {
+		return "ok"
+	}
+	return ""
 }
 
 func fnum(v float64) string {
@@ -215,9 +322,10 @@ func frate(v float64) string {
 }
 
 // ApplyCommands 生成分平台的应用命令；dry 为 true 时只打印。
-// udpIP 是 服务器名 -> 首选 UDP IP 的映射（推荐主备统一用 IPv4 UDP 地址写入系统）。
-func ApplyCommands(rows []*score.Row, ifName string, udpIP map[string]string, dry bool) error {
-	main, back := pick(rows)
+// 取 udp 组（回退 udp6 组）的主备；udpIP 是 服务器名 -> 首选 UDP IP 的映射
+// （推荐主备统一用 IPv4 UDP 地址写入系统）。
+func ApplyCommands(gr *score.GroupedResult, ifName string, udpIP map[string]string, dry bool) error {
+	main, back := gr.UDPServers()
 	if main == nil {
 		return fmt.Errorf("没有可推荐的结果")
 	}

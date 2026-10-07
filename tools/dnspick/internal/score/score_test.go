@@ -111,6 +111,55 @@ func TestRankingIsDeterministicOnTies(t *testing.T) {
 	}
 }
 
+// 多协议分组：udp 与 doh 各自排名、各自推荐主备；Score 返回的扁平视图
+// 必须与 ScoreByGroup().All 一致（保持旧调用方语义）。
+func TestScoreByGroupSeparatesProtocols(t *testing.T) {
+	eps := []prober.Endpoint{
+		{Server: "腾讯DNSPod", Address: "119.29.29.29", Proto: prober.UDP},
+		{Server: "阿里AliDNS", Address: "223.5.5.5", Proto: prober.UDP},
+		{Server: "Google", Address: "https://dns.google/dns-query", Proto: prober.DOH},
+		{Server: "Cloudflare", Address: "https://cloudflare-dns.com/dns-query", Proto: prober.DOH},
+	}
+	r := prober.NewRunner(nil, eps, false, nil)
+	for _, ep := range eps {
+		m := r.Metrics(ep)
+		m.CacheP50, m.Success = 20, 1
+	}
+
+	gr := ScoreByGroup(r, testWeights(), false)
+	if len(gr.Groups) != 2 {
+		t.Fatalf("应分成 udp / doh 两组，got %d", len(gr.Groups))
+	}
+	for _, g := range gr.Groups {
+		if g.Main == nil {
+			t.Errorf("协议组 %s 应有主用推荐", g.Proto)
+			continue
+		}
+		if g.Main.GroupProto != g.Proto {
+			t.Errorf("组 %s 的主用行组标识错位: %s", g.Proto, g.Main.GroupProto)
+		}
+		// 每组名次各自从 1 开始
+		if g.Rows[0].Rank != 1 {
+			t.Errorf("组 %s 的第 1 名应为 1，got %d", g.Proto, g.Rows[0].Rank)
+		}
+		if g.Rows[0].Endpoint.Proto != g.Proto {
+			t.Errorf("组 %s 内出现异组端点 %s", g.Proto, g.Rows[0].Endpoint.Proto)
+		}
+	}
+
+	flat := Score(r, testWeights(), false)
+	if len(flat) != len(gr.All) {
+		t.Fatalf("Score 应与 ScoreByGroup().All 行数一致，got %d vs %d", len(flat), len(gr.All))
+	}
+	// 各自独立调用会生成不同的 Row 对象，按标签与名次逐行对齐比较。
+	for i := range flat {
+		if flat[i].Endpoint.Label() != gr.All[i].Endpoint.Label() || flat[i].Rank != gr.All[i].Rank {
+			t.Errorf("第 %d 行 Score(%s,#%d) 与 All(%s,#%d) 不一致",
+				i, flat[i].Endpoint.Label(), flat[i].Rank, gr.All[i].Endpoint.Label(), gr.All[i].Rank)
+		}
+	}
+}
+
 // 同一个地址重复出现（系统 DNS 恰好也是内置候选）只保留一行。
 func TestDuplicateEndpointsCollapse(t *testing.T) {
 	eps := []prober.Endpoint{

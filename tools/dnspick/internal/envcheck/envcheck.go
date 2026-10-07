@@ -24,6 +24,7 @@ type Info struct {
 	PublicIP      string
 	ProxyDetected bool
 	TUNDetected   bool
+	TUNIface      string // 命中且正在接管上网流量的虚拟网卡名（TUNDetected 为真时有值）
 	Warnings      []string
 }
 
@@ -35,13 +36,13 @@ func Check() *Info {
 	info.IPv6OK = checkIPv6()
 	info.PublicIP = publicIP()
 	info.ProxyDetected = checkProxy()
-	info.TUNDetected = checkTUN()
+	info.TUNDetected, info.TUNIface = checkTUN(info.InterfaceName)
 
 	if info.ProxyDetected {
 		info.Warnings = append(info.Warnings, "检测到系统代理已开启：所有测速结果可能失真，建议关闭代理后重测！")
 	}
 	if info.TUNDetected {
-		info.Warnings = append(info.Warnings, "检测到 TUN/TAP 虚拟网卡（可能是代理的 tun 模式）：全部流量被接管，测速结果不可信，建议关闭后重测！")
+		info.Warnings = append(info.Warnings, fmt.Sprintf("检测到虚拟网卡 %s 正在接管上网流量（可能是代理的 tun 模式）：全部流量被接管，测速结果不可信，建议关闭后重测！", info.TUNIface))
 	}
 	if info.PublicIP == "" {
 		info.Warnings = append(info.Warnings, "无法获取公网 IP，ECS 支持检测将跳过。")
@@ -374,13 +375,25 @@ func checkProxy() bool {
 	return false
 }
 
-// checkTUN 检测 TUN/TAP/utun/WireGuard 等虚拟网卡。
-// 只认"已启用"的网卡：残留的、已断开的适配器不影响实际流量，
-// 报出来会让用户去关一个根本没在工作（或根本关不掉）的东西。
-func checkTUN() bool {
+// tunTakesOver 判定命中的虚拟网卡是否真的接管了上网流量——依据它是不是默认路由出口网卡。
+// exitIface 为空（公网拨号失败、拿不到默认路由）时无法排除，保守判真（宁可多提醒）。
+// 这一点是必要的：Tailscale 这类虚拟网卡只要服务在跑就一直 Up，但不开 exit node 时
+// 只接管 tailnet 内网，公网流量仍走物理网卡——只按网卡名报警会把这种情况误判成"全部流量被接管"。
+func tunTakesOver(ifaceName, exitIface string) bool {
+	if exitIface == "" {
+		return true
+	}
+	return strings.EqualFold(ifaceName, exitIface)
+}
+
+// checkTUN 检测 TUN/TAP/utun/WireGuard 等虚拟网卡，返回（是否接管上网流量, 网卡名）。
+// 只认"已启用"的网卡：残留的、已断开的适配器不影响实际流量，报出来会让用户去关一个
+// 根本没在工作（或根本关不掉）的东西；再叠加 tunTakesOver 的默认路由校验，进一步过滤
+// "网卡在、但没接管公网"的误报（如 Tailscale 未开 exit node）。
+func checkTUN(exitIface string) (bool, string) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return false
+		return false, ""
 	}
 	for _, ifc := range ifaces {
 		if ifc.Flags&net.FlagUp == 0 {
@@ -388,17 +401,23 @@ func checkTUN() bool {
 		}
 		name := strings.ToLower(ifc.Name)
 		for _, kw := range []string{"tun", "tap", "wireguard", "wintun", "utun", "clash", "singbox", "sing-box", "mihomo", "tailscale"} {
-			if strings.Contains(name, kw) {
-				// 排除常见的非 TUN 误报
-				if strings.Contains(name, "adapter") && kw == "tap" {
-					continue
-				}
-				fmt.Fprintf(os.Stderr, "[envcheck] 疑似虚拟网卡: %s（%s）\n", ifc.Name, tunHint(ifc))
-				return true
+			if !strings.Contains(name, kw) {
+				continue
 			}
+			// 排除常见的非 TUN 误报
+			if strings.Contains(name, "adapter") && kw == "tap" {
+				continue
+			}
+			if !tunTakesOver(ifc.Name, exitIface) {
+				fmt.Fprintf(os.Stderr, "[envcheck] 虚拟网卡 %s（%s）未接管默认路由（上网走 %s），不影响本次结果\n",
+					ifc.Name, tunHint(ifc), exitIface)
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "[envcheck] 疑似虚拟网卡: %s（%s）\n", ifc.Name, tunHint(ifc))
+			return true, ifc.Name
 		}
 	}
-	return false
+	return false, ""
 }
 
 // tunHint 给出网卡上第一个可用的地址，便于用户判断是哪一个网络。

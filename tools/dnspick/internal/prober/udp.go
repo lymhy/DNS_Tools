@@ -11,16 +11,27 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+
+	"dnspick/internal/config"
 )
+
+// defaultUDPBufSize 与 DNS Flag Day 2020 建议一致；阈值未配置时兜底。
+const defaultUDPBufSize = 1232
 
 // prober 实现三种协议的查询。绑定网卡时通过 customDialer 使用指定本地地址。
 type prober struct {
 	localAddr net.IP // 可为 nil；多网卡 --interface 时绑定出口
 	hc        *http.Client
+	th        config.Thresholds
 }
 
-// NewQuerier 创建协议查询器；ifAddr 为要绑定的出口网卡 IPv4（可空）。
+// NewQuerier 创建协议查询器（使用内置默认阈值）；ifAddr 为要绑定的出口网卡 IPv4（可空）。
 func NewQuerier(ifAddr net.IP) Querier {
+	return NewQuerierWithThresholds(ifAddr, config.DefaultThresholds())
+}
+
+// NewQuerierWithThresholds 创建协议查询器并采用给定阈值（超时、EDNS0 载荷等）。
+func NewQuerierWithThresholds(ifAddr net.IP, th config.Thresholds) Querier {
 	dialer := &net.Dialer{Timeout: 3 * time.Second}
 	if ifAddr != nil {
 		dialer.LocalAddr = &net.TCPAddr{IP: ifAddr}
@@ -31,10 +42,23 @@ func NewQuerier(ifAddr net.IP) Querier {
 		ResponseHeaderTimeout: 5 * time.Second,
 		ForceAttemptHTTP2:     true,
 	}
+	doHTimeout := th.DoHTimeout()
+	if doHTimeout <= 0 {
+		doHTimeout = 6 * time.Second
+	}
 	return &prober{
 		localAddr: ifAddr,
-		hc:        &http.Client{Transport: transport, Timeout: 6 * time.Second},
+		hc:        &http.Client{Transport: transport, Timeout: doHTimeout},
+		th:        th,
 	}
+}
+
+// udpSize 返回 EDNS0 载荷大小；阈值未配置时用 1232 兜底，避免 0 导致分片。
+func (p *prober) udpSize() uint16 {
+	if p.th.UDPBufSize <= 0 {
+		return defaultUDPBufSize
+	}
+	return uint16(p.th.UDPBufSize)
 }
 
 // udpDialer 返回绑定了出口网卡的 UDP dialer；未指定网卡或地址族不匹配时返回 nil。
@@ -63,9 +87,9 @@ func (p *prober) exchange(ep Endpoint, m *dns.Msg, timeout time.Duration) (*dns.
 	var client *dns.Client
 	switch ep.Proto {
 	case UDP:
-		client = &dns.Client{Net: "udp", Timeout: timeout, Dialer: p.udpDialer(timeout, false), UDPSize: 1232}
+		client = &dns.Client{Net: "udp", Timeout: timeout, Dialer: p.udpDialer(timeout, false), UDPSize: p.udpSize()}
 	case UDP6:
-		client = &dns.Client{Net: "udp", Timeout: timeout, Dialer: p.udpDialer(timeout, true), UDPSize: 1232}
+		client = &dns.Client{Net: "udp", Timeout: timeout, Dialer: p.udpDialer(timeout, true), UDPSize: p.udpSize()}
 	case DOT:
 		client = &dns.Client{
 			Net: "tcp-tls", Timeout: timeout,
@@ -95,38 +119,50 @@ func hostOnly(addr string) string {
 	return addr
 }
 
-// buildQuery 构造 A 查询（含 warmup 可复用）。
-func buildQuery(name string) *dns.Msg {
+// buildQueryType 构造指定记录类型的查询；do 为 true 时置 EDNS0 DO 位（DNSSEC）。
+func (p *prober) buildQueryType(name string, qtype uint16, do bool) *dns.Msg {
 	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(name), dns.TypeA)
+	m.SetQuestion(dns.Fqdn(name), qtype)
 	m.RecursionDesired = true
-	m.SetEdns0(1232, false)
+	m.SetEdns0(p.udpSize(), do)
 	return m
+}
+
+// buildQuery 构造 A 查询（含 warmup 可复用）。
+func (p *prober) buildQuery(name string) *dns.Msg {
+	return p.buildQueryType(name, dns.TypeA, false)
 }
 
 // QueryA 查询 A 记录：UDP/DoT 走 53/853，DoH 走 RFC8484 POST。
 func (p *prober) QueryA(ep Endpoint, name string, timeout time.Duration) ([]string, time.Duration, error) {
-	m := buildQuery(name)
+	return p.queryType(ep, name, dns.TypeA, timeout)
+}
+
+// QueryAAAA 查询 AAAA 记录（双栈可用性检测用）。
+func (p *prober) QueryAAAA(ep Endpoint, name string, timeout time.Duration) ([]string, time.Duration, error) {
+	return p.queryType(ep, name, dns.TypeAAAA, timeout)
+}
+
+// queryType 是 A/AAAA 共用的查询路径。
+func (p *prober) queryType(ep Endpoint, name string, qtype uint16, timeout time.Duration) ([]string, time.Duration, error) {
+	m := p.buildQueryType(name, qtype, false)
 	if ep.Proto == DOH {
 		resp, rtt, err := p.queryDoH(ep, m, timeout)
 		if err != nil {
 			return nil, 0, err
 		}
-		return extractA(resp), rtt, nil
+		return extractAddr(resp, qtype), rtt, nil
 	}
 	resp, rtt, err := p.exchange(ep, m, timeout)
 	if err != nil {
 		return nil, 0, err
 	}
-	return extractA(resp), rtt, nil
+	return extractAddr(resp, qtype), rtt, nil
 }
 
 // QueryTXT 查询 TXT 记录（echo 回显劫持检测用）。
 func (p *prober) QueryTXT(ep Endpoint, name string, timeout time.Duration) ([]string, time.Duration, error) {
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(name), dns.TypeTXT)
-	m.RecursionDesired = true
-	m.SetEdns0(1232, false)
+	m := p.buildQueryType(name, dns.TypeTXT, false)
 	if ep.Proto == DOH {
 		resp, rtt, err := p.queryDoH(ep, m, timeout)
 		if err != nil {
@@ -178,12 +214,99 @@ func (p *prober) queryDoH(ep Endpoint, m *dns.Msg, timeout time.Duration) (*dns.
 	return rm, rtt, nil
 }
 
+// QueryWithDO 以 EDNS0 DO=1 查询，返回 AD / RRSIG / Rcode，供 DNSSEC 判定（RFC 4035）。
+func (p *prober) QueryWithDO(ep Endpoint, name string, timeout time.Duration) (*DNSSECReply, error) {
+	m := p.buildQueryType(name, dns.TypeA, true)
+	var resp *dns.Msg
+	var err error
+	if ep.Proto == DOH {
+		resp, _, err = p.queryDoH(ep, m, timeout)
+	} else {
+		resp, _, err = p.exchange(ep, m, timeout)
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := &DNSSECReply{AD: resp.AuthenticatedData, RCode: resp.Rcode, Answers: extractA(resp)}
+	for _, rr := range resp.Answer {
+		if _, ok := rr.(*dns.RRSIG); ok {
+			out.RRSIG = true
+			break
+		}
+	}
+	return out, nil
+}
+
+// QueryNSID 以 EDNS0 NSID 选项查询根域，返回解析器节点标识（hex 字符串，RFC 5001）。
+// 空串表示解析器未返回 NSID（不支持或未开启）。
+func (p *prober) QueryNSID(ep Endpoint, timeout time.Duration) (string, error) {
+	m := p.buildQueryType(".", dns.TypeNS, false)
+	// buildQueryType 已经加了 OPT，这里只追加 NSID 选项（重复 SetEdns0 会产生两个 OPT）。
+	if opt := m.IsEdns0(); opt != nil {
+		opt.Option = append(opt.Option, &dns.EDNS0_NSID{Code: dns.EDNS0NSID})
+	}
+	var resp *dns.Msg
+	var err error
+	if ep.Proto == DOH {
+		resp, _, err = p.queryDoH(ep, m, timeout)
+	} else {
+		resp, _, err = p.exchange(ep, m, timeout)
+	}
+	if err != nil {
+		return "", err
+	}
+	opt := resp.IsEdns0()
+	if opt == nil {
+		return "", nil
+	}
+	for _, o := range opt.Option {
+		if n, ok := o.(*dns.EDNS0_NSID); ok {
+			return n.Nsid, nil
+		}
+	}
+	return "", nil
+}
+
+// QueryCHAOS 以 CH 类查询 version.bind / hostname.bind（RFC 4892 实践）。
+// REFUSED / NOTIMP / SERVFAIL 视为"未开放"：返回空切片且不报错。
+func (p *prober) QueryCHAOS(ep Endpoint, name string, timeout time.Duration) ([]string, error) {
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(name), dns.TypeTXT)
+	m.Question[0].Qclass = dns.ClassCHAOS
+	m.RecursionDesired = false
+	var resp *dns.Msg
+	var err error
+	if ep.Proto == DOH {
+		resp, _, err = p.queryDoH(ep, m, timeout)
+	} else {
+		resp, _, err = p.exchange(ep, m, timeout)
+	}
+	if err != nil {
+		return nil, err
+	}
+	switch resp.Rcode {
+	case dns.RcodeRefused, dns.RcodeServerFailure, dns.RcodeNotImplemented:
+		return nil, nil
+	}
+	return extractTXT(resp), nil
+}
+
 func extractA(m *dns.Msg) []string {
+	return extractAddr(m, dns.TypeA)
+}
+
+func extractAddr(m *dns.Msg, qtype uint16) []string {
 	var out []string
 	for _, rr := range m.Answer {
 		switch r := rr.(type) {
 		case *dns.A:
-			out = append(out, r.A.String())
+			if qtype == dns.TypeA {
+				out = append(out, r.A.String())
+			}
+		case *dns.AAAA:
+			if qtype == dns.TypeAAAA {
+				out = append(out, r.AAAA.String())
+			}
 		}
 	}
 	return out
@@ -208,7 +331,7 @@ func (p *prober) QueryNSViaTCP(name string, timeout time.Duration) ([]string, er
 			if err != nil || len(nsIPs) == 0 {
 				continue
 			}
-			m := buildQuery(name)
+			m := p.buildQuery(name)
 			c := &dns.Client{Net: "tcp", Timeout: timeout, Dialer: p.tcpDialer(timeout)}
 			resp, _, err := c.Exchange(m, net.JoinHostPort(nsIPs[0], "53"))
 			if err != nil {
@@ -223,9 +346,9 @@ func (p *prober) QueryNSViaTCP(name string, timeout time.Duration) ([]string, er
 	return net.LookupHost(name)
 }
 
-// rawQueryRaw 供 ECS 检测携带自定义 EDNS 选项查询（UDP）。
+// QueryWithECS 供 ECS 检测携带自定义 EDNS 选项查询（UDP）。
 func (p *prober) QueryWithECS(ep Endpoint, name string, ecsNet net.IPNet, timeout time.Duration) ([]string, time.Duration, error) {
-	m := buildQuery(name)
+	m := p.buildQuery(name)
 	if ecsNet.IP != nil {
 		if opt := m.IsEdns0(); opt != nil {
 			family := uint16(1)

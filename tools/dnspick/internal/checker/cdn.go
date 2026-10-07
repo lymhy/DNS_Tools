@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"sort"
 	"time"
+
+	"dnspick/internal/prober"
 )
 
 // sortedKeys 返回有序的域名列表：Go 的 map 遍历顺序随机，直接遍历会导致每个
@@ -51,14 +53,12 @@ func newProbeClient(ifIP net.IP, sni string) *http.Client {
 	}
 }
 
-// ttfbSamples 抽样 topN 个域名（按域名排序，保证所有端点抽的是同一批），
-// 对每个域名返回的第一个 IP 以正确 SNI 发 HTTPS HEAD，测首字节时间。
-func ttfbSamples(perDomain map[string][]string, topN int, ifIP net.IP) []float64 {
+// ttfbSamples 抽样 topN 个域名，对每个域名的第一个 IP 以正确 SNI 发 HTTPS HEAD，测首字节时间。
+// 域名先稳定排序再按 seed 抽样：排序保证所有端点看到同一份候选，抽样保证可复现，
+// 并且不会永远只挑字典序靠前的那几个域名。
+func ttfbSamples(perDomain map[string][]string, topN int, ifIP net.IP, seed int64) []float64 {
 	var out []float64
-	for _, domain := range sortedKeys(perDomain) {
-		if len(out) >= topN {
-			break
-		}
+	for _, domain := range prober.SampleSubset(sortedKeys(perDomain), topN, seed) {
 		ips := perDomain[domain]
 		if len(ips) == 0 {
 			continue

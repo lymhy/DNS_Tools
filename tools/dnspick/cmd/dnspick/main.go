@@ -26,7 +26,7 @@ import (
 )
 
 var (
-	version = "1.0.0"
+	version = "1.1.0"
 	showVer = flag.Bool("version", false, "显示版本")
 )
 
@@ -44,6 +44,10 @@ func main() {
 	applyFlag := flag.Bool("apply", false, "生成将推荐结果写入系统 DNS 的命令（dry-run 展示）")
 	applyForce := flag.Bool("apply-force", false, "实际执行写入系统 DNS（先备份当前配置）")
 	monitor := flag.String("monitor", "", "周期复测，如 30m；Ctrl-C 结束输出汇总")
+	samplesFlag := flag.Int("samples", 0, "覆盖有效样本数（0=按模式默认：快速 8 / 完整 30，上限 200）")
+	seedFlag := flag.Int64("seed", 20260101, "抽样随机种子（0=真随机；默认固定以便复现）")
+	noAux := flag.Bool("no-aux", false, "跳过 DNSSEC/NSID/双栈辅助探测")
+	listThresholds := flag.Bool("list-thresholds", false, "打印测量阈值与依据表后退出")
 	flag.Parse()
 
 	if *showVer {
@@ -58,12 +62,21 @@ func main() {
 		fmt.Println("已导出默认配置到 dnspick.yaml，可修改后用 --config dnspick.yaml 使用")
 		return
 	}
+	if *listThresholds {
+		fmt.Print(config.ThresholdDoc())
+		return
+	}
 	fmt.Printf("dnspick v%s —— 本地宽带 DNS 优选工具\n\n", version)
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "加载配置失败:", err)
 		os.Exit(1)
+	}
+	// 生效阈值：--no-aux 直接关掉辅助探测，score/report 据此决定是否展示 DNSSEC/NSID/AAAA。
+	th := cfg.Thresholds
+	if *noAux {
+		th.AuxEnabled = false
 	}
 
 	// ── 阶段0 环境自检 ──
@@ -187,51 +200,66 @@ func main() {
 		os.Exit(1)
 	}
 
-	run := func() ([]*score.Row, string) {
-		q := prober.NewQuerier(ifIP)
+	run := func() (*score.GroupedResult, report.ReportMeta, string) {
+		started := time.Now()
+		q := prober.NewQuerierWithThresholds(ifIP, th)
 		r := prober.NewRunner(q, eps, *full, func(f string, a ...any) {
 			fmt.Printf("[进度] "+f+"\n", a...)
 		})
+		r.SetThresholds(th)
+		r.SetSamples(*samplesFlag)
 
 		hot := cfg.CDNSet()
 		if len(hot) == 0 {
 			hot = []string{"www.baidu.com"}
 		}
-		// 快速模式就近性域名集 8 个；完整模式 20 个
+		// 就近性域名集：快速模式 th.CDNFast 个；完整模式 th.CDNFull 个
 		cdnDomains := hot
-		limit := 8
+		limit := th.CDNFast
 		if *full {
-			limit = 20
+			limit = th.CDNFull
 		}
 		if len(cdnDomains) > limit {
 			cdnDomains = cdnDomains[:limit]
 		}
 
 		// 阶段1：缓存延迟 + 成功率
-		r.Phase1Latency(hot, 2*time.Second)
+		r.Phase1Latency(hot, th.Timeout())
 		// 干净度：劫持（快速/完整都测）
-		checker.CheckHijack(r, env.SystemDNS)
+		checker.CheckHijack(r, env.SystemDNS, &th)
+
+		// 辅助探测：DNSSEC 验证 / NSID / 双栈（--no-aux 可关）
+		if th.AuxEnabled {
+			checker.CheckDNSSEC(r, &th)
+			checker.CheckNSID(r, &th)
+			auxDomains := cdnDomains
+			if len(auxDomains) > 3 {
+				auxDomains = auxDomains[:3]
+			}
+			checker.CheckDualStack(r, auxDomains, &th)
+		}
+
 		// 就近性：解析 + geo + TCP
-		answers := r.Phase3ResolveCDN(cdnDomains, 2*time.Second)
-		checker.CheckCDN(r, answers, loc, myProvince, *full, ifIP)
+		answers := r.Phase3ResolveCDN(cdnDomains, th.Timeout())
+		checker.CheckCDN(r, answers, loc, myProvince, *full, ifIP, &th, *seedFlag)
 
 		if *full {
-			r.Phase2Recursion([]string{"probe.baidu.com", "probe.qq.com"}, 5, 3*time.Second)
-			checker.CheckConsistency(r, cdnDomains)
+			r.Phase2Recursion([]string{"probe.baidu.com", "probe.qq.com"}, th.RecRounds, th.RecTimeout())
+			checker.CheckConsistency(r, cdnDomains, &th)
 			auth := func(d string) []string {
-				ips, err := q.QueryNSViaTCP(d, 3*time.Second)
+				ips, err := q.QueryNSViaTCP(d, th.RecTimeout())
 				if err != nil {
 					return nil
 				}
 				return ips
 			}
-			checker.CheckPollution(r, cfg.Domains.Polluted, auth)
-			checker.CheckECS(r, env.PublicIP, cdnDomains[0])
+			checker.CheckPollution(r, cfg.Domains.Polluted, auth, &th)
+			checker.CheckECS(r, env.PublicIP, cdnDomains[0], &th)
 		}
-		rows := score.Score(r, &cfg.Weights, geoOK)
+		gr := score.ScoreByGroup(r, &cfg.Weights, geoOK)
 		// 归属列：给能查到归属的解析器地址（UDP/UDP6）补上地理/运营商描述。
 		if geoOK {
-			for _, row := range rows {
+			for _, row := range gr.All {
 				if row.Endpoint.Proto == prober.UDP || row.Endpoint.Proto == prober.UDP6 {
 					row.Geo = loc.Describe(row.Endpoint.Address)
 				}
@@ -252,8 +280,19 @@ func main() {
 			caveat = "⚠ 检测到 " + ptLabel + "：全部流量已被接管，本次延迟与就近性数据不可信，" +
 				"以上推荐仅供参考——请关闭代理/TUN 后重测。"
 		}
-		tableText := report.Table(rows, envSummary, caveat, *full)
-		return rows, tableText
+		finished := time.Now()
+		mode := "快速"
+		if *full {
+			mode = "完整"
+		}
+		meta := report.ReportMeta{
+			Version: version, Mode: mode, Seed: *seedFlag,
+			Samples: r.Samples, Warmup: r.Warmup, QPS: th.QPS, TimeoutMS: th.TimeoutMS,
+			Retries: th.Retries, AuxEnabled: th.AuxEnabled,
+			Started: started, Finished: finished, DurationS: finished.Sub(started).Seconds(),
+		}
+		tableText := report.Table(gr, meta, envSummary, caveat, *full)
+		return gr, meta, tableText
 	}
 
 	if *monitor != "" {
@@ -270,7 +309,7 @@ func main() {
 		}
 	}
 
-	rows, tableText := run()
+	gr, meta, tableText := run()
 
 	// 结果文件：双击运行（无任何 flag，窗口结束即关）或没有用 --json/--csv 落盘时，
 	// 至少留下一份文本结果，避免"跑完什么都没留下"。
@@ -284,21 +323,21 @@ func main() {
 	}
 
 	if *jsonOut != "" {
-		if err := report.JSON(rows, *jsonOut); err != nil {
+		if err := report.JSON(gr, meta, *jsonOut); err != nil {
 			fmt.Fprintln(os.Stderr, "导出 JSON 失败:", err)
 		} else {
 			fmt.Println("JSON 结果已写入", *jsonOut)
 		}
 	}
 	if *csvOut != "" {
-		if err := report.CSV(rows, *csvOut); err != nil {
+		if err := report.CSV(gr, *csvOut); err != nil {
 			fmt.Fprintln(os.Stderr, "导出 CSV 失败:", err)
 		} else {
 			fmt.Println("CSV 结果已写入", *csvOut)
 		}
 	}
 	if *applyFlag || *applyForce {
-		if err := report.ApplyCommands(rows, ifName, udpIP, !*applyForce); err != nil {
+		if err := report.ApplyCommands(gr, ifName, udpIP, !*applyForce); err != nil {
 			fmt.Fprintln(os.Stderr, "生成应用命令失败:", err)
 		}
 		if !*applyForce {
