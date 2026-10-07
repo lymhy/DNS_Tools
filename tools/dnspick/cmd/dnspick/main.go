@@ -31,6 +31,9 @@ var (
 )
 
 func main() {
+	// 退出前还原控制台输出码页：init 里把输出码页切成了 UTF-8，不还原会把
+	// 调用方（如 dnspick.bat）留在 UTF-8 下，它随后用 GBK 写的中文就成乱码。
+	defer restoreConsoleOutputCP()
 	full := flag.Bool("full", false, "完整模式（+递归延迟/污染比对/ECS/TTFB）")
 	serversFlag := flag.String("servers", "", "只测指定 DNS（逗号分隔 IP 或名称）")
 	protoFlag := flag.String("protocol", "", "协议筛选：udp,udp6,doh,dot（默认 udp,doh；IPv6 可用时含 udp6）")
@@ -57,7 +60,7 @@ func main() {
 	if *dumpConfig {
 		if err := config.WriteDefaultTemplate("dnspick.yaml"); err != nil {
 			fmt.Fprintln(os.Stderr, "导出配置失败:", err)
-			os.Exit(1)
+			exitNow(1)
 		}
 		fmt.Println("已导出默认配置到 dnspick.yaml，可修改后用 --config dnspick.yaml 使用")
 		return
@@ -71,7 +74,7 @@ func main() {
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "加载配置失败:", err)
-		os.Exit(1)
+		exitNow(1)
 	}
 	// 生效阈值：--no-aux 直接关掉辅助探测，score/report 据此决定是否展示 DNSSEC/NSID/AAAA。
 	th := cfg.Thresholds
@@ -197,7 +200,7 @@ func main() {
 	}
 	if len(eps) == 0 {
 		fmt.Fprintln(os.Stderr, "没有可测的候选 DNS 端点")
-		os.Exit(1)
+		exitNow(1)
 	}
 
 	run := func() (*score.GroupedResult, report.ReportMeta, string) {
@@ -299,7 +302,7 @@ func main() {
 		interval, err := time.ParseDuration(*monitor)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "--monitor 参数无效:", err)
-			os.Exit(1)
+			exitNow(1)
 		}
 		fmt.Printf("监控模式：每 %s 复测一轮，Ctrl-C 结束输出汇总\n", interval)
 		for {
@@ -352,6 +355,13 @@ func main() {
 	}
 }
 
+// exitNow 还原控制台输出码页后再退出。
+// os.Exit 不会执行 defer，所以带错误码退出的路径必须走这里，否则码页还原会被跳过。
+func exitNow(code int) {
+	restoreConsoleOutputCP()
+	os.Exit(code)
+}
+
 func orDash(s string) string {
 	if s == "" {
 		return "-"
@@ -378,7 +388,7 @@ func useInterface(env *envcheck.Info, name string) (string, net.IP) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "找不到网卡 %q。本机网卡：\n", name)
 		printInterfaces("", nil)
-		os.Exit(1)
+		exitNow(1)
 	}
 	var ifIP net.IP
 	addrs, _ := ifc.Addrs()

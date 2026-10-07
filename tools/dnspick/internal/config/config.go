@@ -104,12 +104,14 @@ func DefaultThresholds() Thresholds {
 func Default() *Config {
 	return &Config{
 		Servers: []Server{
-			{Name: "腾讯DNSPod", IPs: []string{"119.29.29.29", "182.254.116.116"}, IPv6: []string{"2402:4e00::"}, DoH: "https://doh.pub/dns-query", DoT: "dot.pub:853", Region: "境内"},
+			{Name: "腾讯DNSPod", IPs: []string{"119.29.29.29", "182.254.116.116", "119.28.28.28", "182.254.118.118"}, IPv6: []string{"2402:4e00::"}, DoH: "https://doh.pub/dns-query", DoT: "dot.pub:853", Region: "境内"},
 			{Name: "阿里AliDNS", IPs: []string{"223.5.5.5", "223.6.6.6"}, IPv6: []string{"2400:3200::1", "2400:3200:baba::1"}, DoH: "https://dns.alidns.com/dns-query", DoT: "dns.alidns.com:853", Region: "境内"},
 			{Name: "114DNS", IPs: []string{"114.114.114.114", "114.114.115.115"}, Region: "境内"},
-			{Name: "360DNS", IPs: []string{"101.226.4.6", "123.125.81.6"}, DoH: "https://doh.360.cn/dns-query", Region: "境内"},
 			{Name: "百度DNS", IPs: []string{"180.76.76.76"}, DoH: "https://dns.baidu.com/dns-query", Region: "境内"},
 			{Name: "CNNIC SDNS", IPs: []string{"1.2.4.8", "210.2.4.8"}, Region: "境内"},
+			{Name: "OneDNS（拦截版）", IPs: []string{"117.50.22.22", "52.80.66.66"}, Region: "境内"},
+			{Name: "OneDNS（纯净版）", IPs: []string{"117.50.10.10", "52.80.52.52"}, Region: "境内"},
+			{Name: "字节跳动火山引擎", IPs: []string{"180.184.1.1", "180.184.2.2"}, Region: "境内"},
 			{Name: "Google", IPs: []string{"8.8.8.8", "8.8.4.4"}, IPv6: []string{"2001:4860:4860::8888"}, DoH: "https://dns.google/dns-query", DoT: "dns.google:853", Region: "境外"},
 			{Name: "Cloudflare", IPs: []string{"1.1.1.1", "1.0.0.1"}, IPv6: []string{"2606:4700:4700::1111"}, DoH: "https://cloudflare-dns.com/dns-query", DoT: "one.one.one.one:853", Region: "境外"},
 			{Name: "Quad9", IPs: []string{"9.9.9.9"}, IPv6: []string{"2620:fe::fe"}, DoH: "https://dns.quad9.net/dns-query", DoT: "dns.quad9.net:853", Region: "境外"},
@@ -359,10 +361,10 @@ const defaultTemplateYAML = `# dnspick 配置模板（由 dnspick --dump-config 
 
 # ── 候选 DNS ───────────────────────────────────────────────────────────
 # 注意：一旦提供 servers，就会「整体替换」内置候选列表（不是追加）。
-# 想在默认 9 个候选之上增加，请复制下方全部条目后再追加自己的条目。
+# 想在默认 11 个候选之上增加，请复制下方全部条目后再追加自己的条目。
 servers:
   - name: 腾讯DNSPod            # 展示名（必填）
-    ips: ["119.29.29.29", "182.254.116.116"]   # IPv4 入口（必填，至少一项）
+    ips: ["119.29.29.29", "182.254.116.116", "119.28.28.28", "182.254.118.118"]   # IPv4 入口（必填，至少一项）
     ipv6: ["2402:4e00::"]                      # IPv6 入口（可选）
     doh: https://doh.pub/dns-query             # DoH 入口（可选，RFC 8484）
     dot: dot.pub:853                           # DoT 入口（可选，RFC 7858）
@@ -376,16 +378,21 @@ servers:
   - name: 114DNS
     ips: ["114.114.114.114", "114.114.115.115"]
     region: 境内
-  - name: 360DNS
-    ips: ["101.226.4.6", "123.125.81.6"]
-    doh: https://doh.360.cn/dns-query
-    region: 境内
   - name: 百度DNS
     ips: ["180.76.76.76"]
     doh: https://dns.baidu.com/dns-query
     region: 境内
   - name: CNNIC SDNS
     ips: ["1.2.4.8", "210.2.4.8"]
+    region: 境内
+  - name: OneDNS（拦截版）
+    ips: ["117.50.22.22", "52.80.66.66"]
+    region: 境内
+  - name: OneDNS（纯净版）
+    ips: ["117.50.10.10", "52.80.52.52"]
+    region: 境内
+  - name: 字节跳动火山引擎
+    ips: ["180.184.1.1", "180.184.2.2"]
     region: 境内
   - name: Google
     ips: ["8.8.8.8", "8.8.4.4"]

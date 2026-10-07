@@ -1,7 +1,7 @@
 # dnspick 候选 DNS 配置（与内置默认一致，可自行增删；用 --config 使用本文件）
 servers:
   - name: 腾讯DNSPod
-    ips: ["119.29.29.29", "182.254.116.116"]
+    ips: ["119.29.29.29", "182.254.116.116", "119.28.28.28", "182.254.118.118"]
     ipv6: ["2402:4e00::"]
     doh: https://doh.pub/dns-query
     dot: dot.pub:853
@@ -15,16 +15,21 @@ servers:
   - name: 114DNS
     ips: ["114.114.114.114", "114.114.115.115"]
     region: 境内
-  - name: 360DNS
-    ips: ["101.226.4.6", "123.125.81.6"]
-    doh: https://doh.360.cn/dns-query
-    region: 境内
   - name: 百度DNS
     ips: ["180.76.76.76"]
     doh: https://dns.baidu.com/dns-query
     region: 境内
   - name: CNNIC SDNS
     ips: ["1.2.4.8", "210.2.4.8"]
+    region: 境内
+  - name: OneDNS（拦截版）
+    ips: ["117.50.22.22", "52.80.66.66"]
+    region: 境内
+  - name: OneDNS（纯净版）
+    ips: ["117.50.10.10", "52.80.52.52"]
+    region: 境内
+  - name: 字节跳动火山引擎
+    ips: ["180.184.1.1", "180.184.2.2"]
     region: 境内
   - name: Google
     ips: ["8.8.8.8", "8.8.4.4"]

@@ -159,12 +159,14 @@ NSID（RFC 5001）是 anycast 节点的身份标识。若两个不同名字的�
 | 名称 | IPv4 | IPv6 | DoH | DoT |
 |---|---|---|---|---|
 | 当前系统 DNS（基线） | 自动读取 | 自动读取 | — | — |
-| 腾讯 DNSPod | 119.29.29.29 / 182.254.116.116 | 2402:4e00:: | https://doh.pub/dns-query | dot.pub:853 |
+| 腾讯 DNSPod | 119.29.29.29 / 182.254.116.116 / 119.28.28.28 / 182.254.118.118 | 2402:4e00:: | https://doh.pub/dns-query | dot.pub:853 |
 | 阿里 AliDNS | 223.5.5.5 / 223.6.6.6 | 2400:3200::1 / 2400:3200:baba::1 | https://dns.alidns.com/dns-query | dns.alidns.com:853 |
 | 114DNS | 114.114.114.114 / 114.114.115.115 | — | — | — |
-| 360DNS | 101.226.4.6 / 123.125.81.6 | — | https://doh.360.cn/dns-query | — |
 | 百度 DNS | 180.76.76.76 | — | https://dns.baidu.com/dns-query | — |
 | CNNIC SDNS | 1.2.4.8 / 210.2.4.8 | — | — | — |
+| OneDNS（拦截版） | 117.50.22.22 / 52.80.66.66 | — | — | — |
+| OneDNS（纯净版） | 117.50.10.10 / 52.80.52.52 | — | — | — |
+| 字节跳动火山引擎 | 180.184.1.1 / 180.184.2.2 | — | — | — |
 | Google | 8.8.8.8 / 8.8.4.4 | 2001:4860:4860::8888 | https://dns.google/dns-query | dns.google:853 |
 | Cloudflare | 1.1.1.1 / 1.0.0.1 | 2606:4700:4700::1111 | https://cloudflare-dns.com/dns-query | one.one.one.one:853 |
 | Quad9 | 9.9.9.9 | 2620:fe::fe | https://dns.quad9.net/dns-query | dns.quad9.net:853 |
