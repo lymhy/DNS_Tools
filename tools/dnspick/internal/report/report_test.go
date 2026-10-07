@@ -1,11 +1,32 @@
 package report
 
 import (
+	"strings"
 	"testing"
 
 	"dnspick/internal/prober"
 	"dnspick/internal/score"
 )
+
+// 同一名称下挂着多个地址（如 DNSPod 的 4 个 IPv4）时，排名表与"本组建议"
+// 都必须写明具体地址，否则几行长一个样，看不出这一行到底是哪个 DNS。
+func TestTableShowsEndpointAddress(t *testing.T) {
+	rows := []*score.Row{
+		{Endpoint: prober.Endpoint{Server: "腾讯DNSPod", Address: "119.29.29.29", Proto: prober.UDP},
+			Metrics: &prober.Metrics{}, Total: 90, Usable: true, Rank: 1},
+		{Endpoint: prober.Endpoint{Server: "腾讯DNSPod", Address: "182.254.116.116", Proto: prober.UDP},
+			Metrics: &prober.Metrics{}, Total: 80, Usable: true, Rank: 2},
+	}
+	gr := &score.GroupedResult{Groups: []score.Group{
+		{Proto: prober.UDP, Rows: rows, Main: rows[0]},
+	}}
+	out := Table(gr, ReportMeta{Version: "test", Mode: "快速"}, "", "", false)
+	for _, want := range []string{"腾讯DNSPod (119.29.29.29)", "腾讯DNSPod (182.254.116.116)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("输出应包含 %q，实际:\n%s", want, out)
+		}
+	}
+}
 
 // 只有 UDP/UDP6 端点才有能写进系统 DNS 的地址；
 // DoH 端点的 Address 是 URL，当成 DNS 地址写下去会直接搞坏本机解析。

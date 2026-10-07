@@ -54,9 +54,9 @@ func Table(gr *score.GroupedResult, meta ReportMeta, envSummary, caveat string, 
 		case g.Main == nil:
 			fmt.Fprintf(&buf, "本组建议：没有端点测到有效数据，不做推荐\n")
 		case g.Back != nil:
-			fmt.Fprintf(&buf, "本组建议：主用 %s，备用 %s\n", g.Main.Endpoint.Server, g.Back.Endpoint.Server)
+			fmt.Fprintf(&buf, "本组建议：主用 %s，备用 %s\n", dnsCell(g.Main), dnsCell(g.Back))
 		default:
-			fmt.Fprintf(&buf, "本组建议：主用 %s（未找到跨运营商的备用）\n", g.Main.Endpoint.Server)
+			fmt.Fprintf(&buf, "本组建议：主用 %s（未找到跨运营商的备用）\n", dnsCell(g.Main))
 		}
 		fmt.Fprintln(&buf)
 	}
@@ -76,7 +76,7 @@ func renderGroup(buf *bytes.Buffer, g score.Group, aux, full bool) {
 	fmt.Fprintf(buf, "【协议组 %s】\n", g.Proto)
 	if base := baseline(g.Rows); base != nil {
 		fmt.Fprintf(buf, "本地基线（仅作对比，不参与推荐、不参与归一化基准）：%s 缓存P50 %s、成功率 %.0f%%、同省率 %s\n",
-			base.Endpoint.Server, ms(base.CacheP50), base.Success*100, rate(base.SameProvinceRate))
+			dnsCell(base), ms(base.CacheP50), base.Success*100, rate(base.SameProvinceRate))
 	}
 
 	hdr := []string{"排名", "DNS", "协议", "归属", "缓存P50", "样本n", "丢包", "成功率", "同省率", "TCP中位", "干净度", "总分", "备注"}
@@ -95,7 +95,7 @@ func renderGroup(buf *bytes.Buffer, g score.Group, aux, full bool) {
 			mark = "◀ 备用"
 		}
 		row := []string{
-			rank(r), r.Endpoint.Server, string(r.Endpoint.Proto), geo(r.Geo),
+			rank(r), dnsCell(r), string(r.Endpoint.Proto), geo(r.Geo),
 			ms(r.CacheP50), sampleN(r), loss(r),
 			fmt.Sprintf("%.0f%%", r.Success*100), rate(r.SameProvinceRate), ms(r.TCPMedian),
 			clean(r), fmt.Sprintf("%.1f", r.Total),
@@ -103,7 +103,7 @@ func renderGroup(buf *bytes.Buffer, g score.Group, aux, full bool) {
 		}
 		if full {
 			row = []string{
-				rank(r), r.Endpoint.Server, string(r.Endpoint.Proto), geo(r.Geo),
+				rank(r), dnsCell(r), string(r.Endpoint.Proto), geo(r.Geo),
 				ms(r.CacheP50), ms(r.RecP50), sampleN(r), loss(r), ci(r),
 				fmt.Sprintf("%.0f%%", r.Success*100), rate(r.SameProvinceRate), ms(r.TCPMedian), ms(r.TTFBMedian),
 				nsidCell(r, aux), dnssecCell(r, aux), aaaaCell(r, aux),
@@ -137,6 +137,16 @@ func geo(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// dnsCell 输出"名称（具体地址）"。同一个名称下可能挂着多个地址（如 DNSPod 的
+// 4 个 IPv4、一个 DoH URL），只写名称时排名表里这几行长得一模一样，看不出
+// 到底哪一行是哪个 DNS，所以这里把端点地址一并写出来。
+func dnsCell(r *score.Row) string {
+	if r.Endpoint.Address == "" || r.Endpoint.Address == r.Endpoint.Server {
+		return r.Endpoint.Server
+	}
+	return r.Endpoint.Server + " (" + r.Endpoint.Address + ")"
 }
 
 // rank 本地基线不参与名次，显示 "-"。
